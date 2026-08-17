@@ -1,5 +1,6 @@
 LOW-RAM OLLAMA CONFIGURATION GUIDE — BENCHMARK RESULTS
-Machine: Fedora, KDE Plasma, 13GB RAM total, AMD integrated GPU (CPU-only inference)
+Machine: Fedora, KDE Plasma, 13GB RAM total, AMD Ryzen integrated GPU (Radeon 680M,
+         no ROCm support - confirmed via logs, falls back to CPU-only inference)
 Model: hf.co/tomey265/qwen-coder-my:latest (custom quant, Qwen2.5-Coder-14B-Instruct base,
        Q3_K_M quantization, 14.8B params, 32768 max context, 8 KV attention heads / 40 total)
 Test prompt used for all runs (kept identical for fair comparison):
@@ -9,7 +10,34 @@ and give a Python code example."
 Method: for each setting, swap is cleared (`sudo swapoff -a && sudo swapon -a`),
 then the model is run once with the test prompt, then `ollama ps` and `free -h`
 are captured immediately after the response finishes (before the model unloads).
-3 runs per setting.
+3 runs per setting. Temperature monitored live via `watch -n 2 sensors` in a
+second terminal during later tests.
+
+⚠️ HARDWARE WARNING — read before changing context length
+
+Raising OLLAMA_CONTEXT_LENGTH increases memory use significantly, on top of the
+model's own memory footprint. On this test machine (13GB RAM, no dedicated GPU),
+setting context length to 16000 caused the Linux kernel's OOM (out-of-memory)
+killer to terminate the Ollama process mid-load — confirmed directly in the
+system logs (journalctl -u ollama), not just inferred from a crash.
+
+This does NOT mean the whole computer will shut down — the OOM killer targets
+the specific process using too much memory, and Ollama auto-restarted seconds
+later on its own. But it does mean the model becomes completely unusable at
+that setting until context length is lowered again.
+
+Before raising context length on a low-RAM system:
+- Check your available RAM first (free -h)
+- Increase gradually rather than jumping straight to a large number
+- Check `journalctl -u ollama -n 50 --no-pager` if a request fails or hangs —
+  an OOM kill will say so explicitly in the log
+- Revert the setting immediately if you hit this rather than repeatedly
+  retrying, which just repeats the crash
+
+How to revert a systemd context length override:
+  sudo rm /etc/systemd/system/ollama.service.d/override.conf
+  sudo systemctl daemon-reload
+  sudo systemctl restart ollama
 
 ===========================================
 TEST 1: OLLAMA_FLASH_ATTENTION
@@ -30,9 +58,9 @@ Result: NO measurable difference between baseline and Flash Attention explicitly
 enabled, at this context length (4096), on this model/hardware.
 
 Likely explanation: Ollama's own docs state Flash Attention is used automatically
-whenever the backend/device support it. Most likely it was already active by
-default before the env var was ever set — so the setting was probably redundant
-here, not ineffective. Have not independently confirmed this via logs.
+whenever the backend/device support it (confirmed in logs: flash_attn = auto).
+Most likely it was already active by default before the env var was ever set —
+so the setting was probably redundant here, not ineffective.
 
 Honest note for write-up: this is a genuinely useful negative result for readers
 with similar hardware — don't assume you need to manually set this variable
@@ -41,31 +69,77 @@ before checking whether it's already on by default.
 ===========================================
 TEST 2: OLLAMA_KV_CACHE_TYPE
 ===========================================
-Status: NOT STARTED
+Status: COMPLETE (done), context length limitation noted
 
-Plan: same method as Test 1. Compare baseline (f16, default) vs q8_0 vs q4_0.
-This setting is more likely to show a visible memory difference since it directly
-changes how the KV cache is stored, rather than how attention is computed.
+OLLAMA_KV_CACHE_TYPE=q8_0, at default context length (4096):
+  Run: ollama ps size = 8.3 GB, context = 4096, processor = 100% CPU, swap = 0
+  Temperature check: CPU (Tctl) went from ~41°C idle to ~75°C peak during
+  generation, back down to ~41°C within minutes after completion. GPU (edge)
+  peaked around 60°C. A RAM module sensor (spd5118) briefly tripped its own
+  55°C "high" alarm threshold at 58.8°C, well under its 85°C critical limit.
+  All values returned to normal promptly after generation ended — consistent
+  with normal thermal behavior under load, not a sign of failing cooling.
 
-Note: this model has 8 KV attention heads (out of 40 total) — per Ollama's FAQ
-docs, models with a high GQA head count may see a bigger quality hit from KV
-cache quantization than low-GQA models. Worth keeping an eye on output quality,
-not just memory numbers, when testing q4_0 specifically.
+Result: NO measurable difference vs. baseline at 4096 context.
 
-Command template (once ready to run):
-  sudo swapoff -a && sudo swapon -a
-  free -h
-  OLLAMA_KV_CACHE_TYPE=q8_0 ollama run hf.co/tomey265/qwen-coder-my:latest "[same test prompt]"
-  ollama ps
-  free -h
-  ollama stop hf.co/tomey265/qwen-coder-my:latest
-
-===========================================
-TEST 3: OLLAMA_NUM_PARALLEL
-===========================================
-Status: NOT STARTED
+Likely explanation: at only 4096 context tokens, the KV cache is a small
+fraction of total memory (most of the 8.3GB is model weights, ~7.3GB alone).
+Quantizing an already-small cache may not move the total enough to register
+in ollama ps's reporting. KV cache savings are expected to be more visible
+at longer context lengths, where the cache itself is a bigger share of memory.
 
 ===========================================
-TEST 4: OLLAMA_CONTEXT_LENGTH (different sizes)
+TEST 3: OLLAMA_CONTEXT_LENGTH
+===========================================
+Status: IN PROGRESS — real finding, real crash, documented below
+
+Attempted: OLLAMA_CONTEXT_LENGTH=16000, set via systemd override
+(/etc/systemd/system/ollama.service.d/override.conf)
+
+Complication encountered (worth including in write-up as its own note):
+`sudo systemctl edit ollama.service` initially saved an incomplete override
+file (only "[Service]", missing the actual Environment= line) with no error
+shown. This silently failed to apply the setting on the first two attempts.
+Confirmed by checking:
+  cat /etc/systemd/system/ollama.service.d/override.conf
+Fixed by writing the file directly instead of through the interactive editor:
+  sudo tee /etc/systemd/system/ollama.service.d/override.conf << 'EOF'
+  [Service]
+  Environment="OLLAMA_CONTEXT_LENGTH=16000"
+  EOF
+  sudo systemctl daemon-reload
+  sudo systemctl restart ollama
+Write-up note: tell readers to always verify the override file's contents
+with `cat` after editing, rather than assuming systemctl edit worked.
+
+Once correctly applied (confirmed via journalctl showing
+OLLAMA_CONTEXT_LENGTH:16000 in the server config, and n_ctx = 16128 during
+model load):
+
+RESULT: CRASH. The model load failed. Confirmed via journalctl -u ollama:
+  - Model weight buffers loaded: ~4480 MiB + ~2513 MiB (CPU_REPACK) = ~7GB
+  - KV cache buffer allocated: 3024 MiB
+  - Available system memory at the time: 9.3 GiB
+  - "The kernel OOM killer killed some processes in this unit."
+  - ollama.service: Failed with result 'oom-kill'
+  - Service automatically restarted itself ~4 seconds later (systemd default
+    restart behavior) and returned to normal, context length reverted to
+    default (4096) after override file was removed.
+
+Conclusion: 16000 context length is NOT safe on this hardware (13GB RAM,
+14.8B param Q3_K_M model). The real safe ceiling is somewhere between 4096
+(confirmed working) and 16000 (confirmed OOM crash) — not yet narrowed down.
+
+Next step: test an intermediate value (e.g. 8000) to narrow down the actual
+safe maximum context length for this model on this machine.
+
+Important distinction for write-up: this OOM event killed the Ollama process
+specifically — it did not power off the whole computer. This is a different
+and separate issue from an earlier full-system shutdown this user
+experienced, which remains unexplained and is NOT confirmed to be caused by
+context length or memory pressure. Do not conflate the two in the write-up.
+
+===========================================
+TEST 4: OLLAMA_NUM_PARALLEL
 ===========================================
 Status: NOT STARTED
