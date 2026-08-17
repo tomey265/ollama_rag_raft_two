@@ -1,0 +1,71 @@
+LOW-RAM OLLAMA CONFIGURATION GUIDE — BENCHMARK RESULTS
+Machine: Fedora, KDE Plasma, 13GB RAM total, AMD integrated GPU (CPU-only inference)
+Model: hf.co/tomey265/qwen-coder-my:latest (custom quant, Qwen2.5-Coder-14B-Instruct base,
+       Q3_K_M quantization, 14.8B params, 32768 max context, 8 KV attention heads / 40 total)
+Test prompt used for all runs (kept identical for fair comparison):
+"Explain in detail how a hash table works, including collision handling strategies,
+and give a Python code example."
+
+Method: for each setting, swap is cleared (`sudo swapoff -a && sudo swapon -a`),
+then the model is run once with the test prompt, then `ollama ps` and `free -h`
+are captured immediately after the response finishes (before the model unloads).
+3 runs per setting.
+
+===========================================
+TEST 1: OLLAMA_FLASH_ATTENTION
+===========================================
+Status: COMPLETE (done)
+
+Baseline (no env var set), 3 runs:
+  Run 1: ollama ps size = 8.3 GB, context = 4096, processor = 100% CPU, swap = 0
+  Run 2: ollama ps size = 8.3 GB, context = 4096, processor = 100% CPU, swap = 0
+  Run 3: ollama ps size = 8.3 GB, context = 4096, processor = 100% CPU, swap = 0
+
+OLLAMA_FLASH_ATTENTION=1, 3 runs:
+  Run 1: ollama ps size = 8.3 GB, context = 4096, processor = 100% CPU, swap = 0
+  Run 2: ollama ps size = 8.3 GB, context = 4096, processor = 100% CPU, swap = 0
+  Run 3: ollama ps size = 8.3 GB, context = 4096, processor = 100% CPU, swap = 0
+
+Result: NO measurable difference between baseline and Flash Attention explicitly
+enabled, at this context length (4096), on this model/hardware.
+
+Likely explanation: Ollama's own docs state Flash Attention is used automatically
+whenever the backend/device support it. Most likely it was already active by
+default before the env var was ever set — so the setting was probably redundant
+here, not ineffective. Have not independently confirmed this via logs.
+
+Honest note for write-up: this is a genuinely useful negative result for readers
+with similar hardware — don't assume you need to manually set this variable
+before checking whether it's already on by default.
+
+===========================================
+TEST 2: OLLAMA_KV_CACHE_TYPE
+===========================================
+Status: NOT STARTED
+
+Plan: same method as Test 1. Compare baseline (f16, default) vs q8_0 vs q4_0.
+This setting is more likely to show a visible memory difference since it directly
+changes how the KV cache is stored, rather than how attention is computed.
+
+Note: this model has 8 KV attention heads (out of 40 total) — per Ollama's FAQ
+docs, models with a high GQA head count may see a bigger quality hit from KV
+cache quantization than low-GQA models. Worth keeping an eye on output quality,
+not just memory numbers, when testing q4_0 specifically.
+
+Command template (once ready to run):
+  sudo swapoff -a && sudo swapon -a
+  free -h
+  OLLAMA_KV_CACHE_TYPE=q8_0 ollama run hf.co/tomey265/qwen-coder-my:latest "[same test prompt]"
+  ollama ps
+  free -h
+  ollama stop hf.co/tomey265/qwen-coder-my:latest
+
+===========================================
+TEST 3: OLLAMA_NUM_PARALLEL
+===========================================
+Status: NOT STARTED
+
+===========================================
+TEST 4: OLLAMA_CONTEXT_LENGTH (different sizes)
+===========================================
+Status: NOT STARTED
