@@ -143,3 +143,9 @@ context length or memory pressure. Do not conflate the two in the write-up.
 TEST 4: OLLAMA_NUM_PARALLEL
 ===========================================
 Status: NOT STARTED
+
+If you find this project useful, consider supporting its continued development:
+
+[Donate]  https://paypal.com/paypalme/tomey265
+
+Your support helps fund maintenance, improvements, and future development. Thank you!
