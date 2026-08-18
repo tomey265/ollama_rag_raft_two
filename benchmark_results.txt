@@ -88,6 +88,77 @@ Quantizing an already-small cache may not move the total enough to register
 in ollama ps's reporting. KV cache savings are expected to be more visible
 at longer context lengths, where the cache itself is a bigger share of memory.
 
+### OLLAMA_KV_CACHE_TYPE=q4_0
+
+**Result: ~7% RAM reduction (8.3 GB → 7.7 GB) at default context length (4096)**
+
+Unlike `OLLAMA_FLASH_ATTENTION=1` and `OLLAMA_KV_CACHE_TYPE=q8_0` (both of
+which showed no measurable difference — see above), the more aggressive
+`q4_0` KV cache quantization produced a consistent, repeatable drop in
+memory usage.
+
+#### Method
+
+Same fixed test prompt and procedure used throughout this guide:
+swap cleared (`sudo swapoff -a && sudo swapon -a`) before each run,
+`ollama ps` and `free -h` captured immediately after generation
+completed, while the model was still resident (before the 5-minute
+keep-alive expired).
+
+Setting applied via systemd override:
+
+```bash
+sudo tee /etc/systemd/system/ollama.service.d/override.conf << 'EOF'
+[Service]
+Environment="OLLAMA_KV_CACHE_TYPE=q4_0"
+EOF
+sudo systemctl daemon-reload
+sudo systemctl restart ollama
+```
+
+#### Results (3 runs)
+
+| Run | Model Size (`ollama ps`) | Context | Processor | Swap Used |
+|-----|--------------------------|---------|-----------|-----------|
+| 1   | 7.7 GB                   | 4096    | 100% CPU  | 0 B       |
+| 2   | 7.7 GB                   | 4096    | 100% CPU  | 1.0 GiB   |
+| 3   | 7.7 GB                   | 4096    | 100% CPU  | 995 MiB   |
+
+**Baseline for comparison** (default settings / `q8_0`, from earlier
+tests in this guide): 8.3 GB, context 4096, 100% CPU, no swap.
+
+#### Notes
+
+- The reported model size dropped consistently across all three runs —
+  this is a genuine result, not noise.
+- Swap usage appeared in runs 2 and 3 but did not climb further between
+  them, suggesting general system memory pressure over the course of the
+  test session rather than a leak caused by `q4_0` itself. This machine
+  has 13 GB total RAM, so background/session memory pressure is expected
+  and worth disclosing rather than omitting.
+- Output quality across all three runs remained coherent: each response
+  correctly explained hash table fundamentals and at least two collision
+  resolution strategies (chaining and open addressing), with working
+  Python code. No obvious degradation was observed in this limited,
+  informal check, despite this model having a relatively high ratio of
+  key-value attention heads (8 of 40), which Ollama's own documentation
+  notes can make quality more sensitive to aggressive KV cache
+  quantization. A more rigorous quality comparison (e.g. scoring against
+  a fixed rubric) was not performed and would be a reasonable follow-up.
+
+#### Verification tip learned during this test
+
+`sudo systemctl edit ollama.service` silently saved an incomplete
+override file (missing the `Environment=` line, no error shown) on the
+first two attempts. Always confirm the override actually took effect
+before testing:
+
+```bash
+cat /etc/systemd/system/ollama.service.d/override.conf
+```
+
+The `tee` + `daemon-reload` + `restart` method above is more reliable.
+
 ===========================================
 TEST 3: OLLAMA_CONTEXT_LENGTH
 ===========================================
