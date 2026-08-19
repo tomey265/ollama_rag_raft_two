@@ -210,6 +210,62 @@ and separate issue from an earlier full-system shutdown this user
 experienced, which remains unexplained and is NOT confirmed to be caused by
 context length or memory pressure. Do not conflate the two in the write-up.
 
+### OLLAMA_CONTEXT_LENGTH — narrowing the safe ceiling
+
+**Result: 8000 is safe; 16000 crashes. Exact ceiling not yet pinpointed.**
+
+Following up on the earlier crash at 16000 (see above — confirmed real
+OOM kill via `journalctl`, not inferred), an intermediate value of 8000
+was tested to narrow down where the actual safe limit sits.
+
+#### Method
+
+Same fixed test prompt and procedure used throughout. `OLLAMA_KV_CACHE_TYPE`
+left unset (default) so context length was the only variable under test.
+CPU/GPU temperature monitored live via `watch -n 2 sensors` in a second
+terminal throughout, as a standard precaution given the prior crash.
+
+```bash
+sudo tee /etc/systemd/system/ollama.service.d/override.conf << 'EOF'
+[Service]
+Environment="OLLAMA_CONTEXT_LENGTH=8000"
+EOF
+sudo systemctl daemon-reload
+sudo systemctl restart ollama
+```
+
+#### Results (2 runs)
+
+| Run | Model Size (`ollama ps`) | Context | Processor | Peak Temp |
+|-----|---------------------------|---------|-----------|-----------|
+| 1   | 9.2 GB                    | 8000    | 100% CPU  | ~60°C (Tctl) |
+| 2   | 9.2 GB                    | 8000    | 100% CPU  | not separately logged |
+
+No crash, no OOM event, no errors in either run. Temperatures stayed
+well under the 85°C critical threshold noted in `sensors` output.
+
+#### Comparison across tested context lengths
+
+| Context Length | Result | Model Size |
+|-----------------|--------|-----------|
+| 4096 (default)  | ✅ Works | 8.3 GB |
+| 8000             | ✅ Works (2 consistent runs) | 9.2 GB |
+| 16000            | ❌ Crashes (confirmed OOM kill) | N/A — never finished loading |
+
+#### Notes
+
+- The safe ceiling on this machine (13 GB RAM, no usable GPU offload) is
+  somewhere **between 8000 and 16000** — not yet narrowed further. A
+  reasonable next step for anyone reproducing this would be testing a
+  midpoint (e.g. 12000), which was not performed here due to time
+  constraints.
+- As before, available system memory dropped significantly while the
+  model was loaded (available RAM fell to ~2.2 GB during generation),
+  and modest swap usage was observed. This is expected on a 13 GB
+  machine running a ~7–9 GB model and is not itself evidence of a
+  problem — it only becomes a problem if it triggers an actual OOM kill,
+  which did not happen at 8000.
+
 ===========================================
 TEST 4: OLLAMA_NUM_PARALLEL
 ===========================================
