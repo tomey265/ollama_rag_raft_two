@@ -327,6 +327,75 @@ silently without changing behavior.
 | Sequential (1 request at a time) | ~3–4 min | Baseline from earlier single-run tests |
 | Parallel (2 concurrent, `NUM_PARALLEL=2`) | ~3m41s–5m16s per request | Both requests still complete, but each takes somewhat longer |
 
+### OLLAMA_MAX_LOADED_MODELS=2
+
+**Result: Two different models (generation + embedding) successfully coexist in memory without eviction**
+
+Unlike `OLLAMA_NUM_PARALLEL` (concurrent requests to the *same* model),
+this setting controls how many *different* models Ollama will keep
+resident simultaneously — directly relevant to RAG-style workflows
+(see Repo 1) that need both a generation model and an embedding model
+available without constant reload overhead.
+
+#### Method
+
+`OLLAMA_NUM_PARALLEL` and `OLLAMA_CONTEXT_LENGTH` left at defaults so
+`OLLAMA_MAX_LOADED_MODELS` was the only variable under test.
+
+```bash
+sudo tee /etc/systemd/system/ollama.service.d/override.conf << 'EOF'
+[Service]
+Environment="OLLAMA_MAX_LOADED_MODELS=2"
+EOF
+sudo systemctl daemon-reload
+sudo systemctl restart ollama
+```
+
+Procedure: load the generation model (`hf.co/tomey265/qwen-coder-my:latest`)
+with the standard fixed test prompt, confirm it's resident via
+`ollama ps`, then load the embedding model (`nomic-embed-text:latest`)
+on top of it with a simple test string, and check whether both remain
+loaded or the first gets evicted.
+
+#### Results (2 runs)
+
+| Run | Models Resident | Sizes | Result |
+|-----|------------------|-------|--------|
+| 1   | qwen-coder + nomic-embed-text | 8.3 GB + 376 MB | ✅ Both loaded, no eviction |
+| 2   | qwen-coder + nomic-embed-text | 8.3 GB + 376 MB | ✅ Both loaded, no eviction |
+
+Server logs confirmed `loaded runners count=2` in both runs, and the
+embedding model returned a valid 768-dimension embedding vector each
+time — confirming it wasn't just "listed" as loaded but actually
+functional alongside the generation model.
+
+#### Memory headroom
+
+| Run | Available RAM (both models loaded) |
+|-----|--------------------------------------|
+| 1   | 9.5 GiB |
+| 2   | 2.7 GiB |
+
+The drop in run 2's available memory is most likely attributable to
+general session memory pressure that built up over the course of the
+day's testing (swap usage had been gradually climbing across earlier
+tests too), not something caused by `MAX_LOADED_MODELS` itself. No
+crash or OOM event occurred in either run.
+
+#### Notes
+
+- This is a clean positive result: on this machine, running the
+  generation model + embedding model together only costs ~376 MB extra
+  over the generation model alone — well within budget even under
+  memory pressure.
+- This setting is directly useful for RAG pipelines like Repo 1, where
+  avoiding repeated model reloads between embedding and generation steps
+  saves real time.
+- Not tested here: behavior when `MAX_LOADED_MODELS` is deliberately set
+  too low (e.g. 1) while trying to use two models — this would be a
+  reasonable follow-up to demonstrate the eviction behavior this setting
+  is meant to prevent.
+
 #### Notes
 
 - No crash, no OOM, no errors in either round. Temperatures stayed safe
