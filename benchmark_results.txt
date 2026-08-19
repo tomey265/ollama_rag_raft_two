@@ -269,7 +269,79 @@ well under the 85°C critical threshold noted in `sensors` output.
 ===========================================
 TEST 4: OLLAMA_NUM_PARALLEL
 ===========================================
-Status: NOT STARTED
+Status: COMPLETED
+
+### OLLAMA_NUM_PARALLEL=2
+
+**Result: 2 concurrent requests complete successfully — no crash — at the cost of slower per-request completion time (CPU-bound tradeoff)**
+
+Unlike the earlier single-request tests, `OLLAMA_NUM_PARALLEL` only shows
+its effect under concurrent load, so this test was run differently:
+two identical requests were fired at the same time (backgrounded shell
+jobs) instead of one sequential request.
+
+#### Method
+
+`OLLAMA_KV_CACHE_TYPE` and `OLLAMA_CONTEXT_LENGTH` left at defaults so
+`OLLAMA_NUM_PARALLEL` was the only variable under test. Same fixed test
+prompt used for both concurrent requests. CPU/GPU temperature monitored
+live via `watch -n 2 sensors` throughout, as a standard precaution.
+
+```bash
+sudo tee /etc/systemd/system/ollama.service.d/override.conf << 'EOF'
+[Service]
+Environment="OLLAMA_NUM_PARALLEL=2"
+EOF
+sudo systemctl daemon-reload
+sudo systemctl restart ollama
+```
+
+Two requests launched concurrently:
+
+```bash
+ollama run hf.co/tomey265/qwen-coder-my:latest "<test prompt>" > /tmp/run1.txt 2>&1 &
+ollama run hf.co/tomey265/qwen-coder-my:latest "<test prompt>" > /tmp/run2.txt 2>&1 &
+wait
+```
+
+#### Results (2 rounds, 2 concurrent requests each)
+
+| Round | Request | Total Time | Tokens | Result |
+|-------|---------|-----------|--------|--------|
+| 1     | A       | 5m16s     | 1021   | ✅ Success |
+| 1     | B       | (not separately logged, completed successfully) | — | ✅ Success |
+| 2     | A (slot 0) | 3m41s  | 673    | ✅ Success |
+| 2     | B (slot 1) | 4m15s  | 798    | ✅ Success |
+
+Model size while both requests were active: **9.2 GB** (context 4096).
+
+Server logs in round 2 confirmed two distinct processing slots (`slot id
+0` and `slot id 1`) were actually used concurrently, verifying that
+`OLLAMA_NUM_PARALLEL=2` was genuinely in effect and not just accepted
+silently without changing behavior.
+
+#### Comparison to sequential baseline
+
+| Mode | Per-request time | Notes |
+|------|-------------------|-------|
+| Sequential (1 request at a time) | ~3–4 min | Baseline from earlier single-run tests |
+| Parallel (2 concurrent, `NUM_PARALLEL=2`) | ~3m41s–5m16s per request | Both requests still complete, but each takes somewhat longer |
+
+#### Notes
+
+- No crash, no OOM, no errors in either round. Temperatures stayed safe
+  throughout (peaked ~54°C GPU edge / ~61.5°C CPU Tctl — well under the
+  85°C critical threshold).
+- On this CPU-only, no-GPU-offload hardware, running 2 requests in
+  parallel does **not** roughly halve total throughput the way it might
+  on a machine with more cores/GPU headroom — each request slows down
+  somewhat rather than running at full independent speed, because both
+  are competing for the same CPU cycles. This is an expected, honest
+  result: `NUM_PARALLEL` buys concurrency (no request has to wait in a
+  queue), not free extra throughput, on constrained hardware.
+- This tradeoff is worth calling out explicitly for anyone reading this
+  guide who might assume "parallel = faster" — on this class of machine,
+  it's really "parallel = no queueing, same total work."
 
 If you find this project useful, consider supporting its continued development:
 
